@@ -1,0 +1,858 @@
+-- Tim Tim Hub
+-- Rayfield Gen2
+
+if getgenv().TimTimHubLoaded then
+    pcall(function() Rayfield:Destroy() end)
+end
+getgenv().TimTimHubLoaded = true
+
+local Players = game:GetService("Players")
+local Workspace = game:GetService("Workspace")
+local RunService = game:GetService("RunService")
+
+local LocalPlayer = Players.LocalPlayer
+
+local Rayfield = loadstring(game:HttpGet("https://sirius.menu/gen2"))()
+
+local window = Rayfield:CreateWindow({
+    name = "Tim Tim Hub",
+    subtitle = "by Leo",
+    sidebarLayout = true,
+    configuration = {
+        autoSave = true,
+        autoLoad = true,
+        fileName = "TimTimHub",
+    },
+})
+
+local MainTab = window:CreateTab({ name = "Main" })
+local VisualTab = window:CreateTab({ name = "Visual" })
+local PlayerTab = window:CreateTab({ name = "Player" })
+
+local EGG_ORDER = {
+    "White Egg", "Brown Egg", "Cracked Egg", "Easter Egg", "Stone Egg", "Leaf Egg",
+    "Mushroom Egg", "Flower Egg", "Slime Egg", "Ice Egg", "Glass Egg", "Golden Egg",
+    "Crystal Egg", "Skull Egg", "Dominus Egg", "Flaming Egg", "Sinister Egg", "Soul Egg",
+    "Aurora Egg", "Galaxy Egg", "Blackhole Egg", "Solaris Egg", "Cherub Egg",
+}
+
+local function getHumanoid()
+    local char = LocalPlayer.Character
+    return char and char:FindFirstChildOfClass("Humanoid")
+end
+
+local function firePrompt(prompt)
+    if not prompt or not prompt.Parent then return false end
+    if typeof(fireproximityprompt) ~= "function" then return false end
+    return pcall(function()
+        fireproximityprompt(prompt, prompt.HoldDuration)
+    end)
+end
+
+local function getPromptPart(prompt)
+    local parent = prompt.Parent
+    if not parent then return nil end
+    if parent:IsA("BasePart") then return parent end
+    if parent:IsA("Attachment") then return parent.Parent end
+    return parent:FindFirstAncestorWhichIsA("BasePart")
+end
+
+local function getBillboardPart(billboard)
+    local adornee = billboard.Adornee or billboard.Parent
+    if not adornee then return nil end
+    if adornee:IsA("BasePart") then return adornee end
+    return adornee:FindFirstChildWhichIsA("BasePart", true) or adornee:FindFirstAncestorWhichIsA("BasePart")
+end
+
+--// SHARED: WORLD EGG TRACKING
+local EggESP = { Enabled = false }
+local EggRegistry = {}
+
+local function isPickupPrompt(prompt)
+    if not prompt:IsA("ProximityPrompt") then return false end
+    local text = (prompt.ObjectText or ""):lower()
+    return text:find("egg") ~= nil
+end
+
+local function addEggPrompt(prompt)
+    if EggRegistry[prompt] then return end
+    if not isPickupPrompt(prompt) then return end
+
+    local part = getPromptPart(prompt)
+    if not part then return end
+
+    local eggName = prompt.ObjectText
+
+    local highlight = Instance.new("Highlight")
+    highlight.FillColor = Color3.fromRGB(255, 255, 255)
+    highlight.OutlineColor = Color3.fromRGB(255, 215, 0)
+    highlight.FillTransparency = 0.5
+    highlight.OutlineTransparency = 0
+    highlight.Adornee = part
+    highlight.Parent = part
+    highlight.Enabled = EggESP.Enabled
+
+    local billboard = Instance.new("BillboardGui")
+    billboard.Name = "TimTimEggESP"
+    billboard.Adornee = part
+    billboard.Size = UDim2.new(0, 150, 0, 40)
+    billboard.StudsOffset = Vector3.new(0, 2.5, 0)
+    billboard.AlwaysOnTop = true
+    billboard.Enabled = EggESP.Enabled
+    billboard.Parent = part
+
+    local label = Instance.new("TextLabel")
+    label.BackgroundTransparency = 1
+    label.Size = UDim2.new(1, 0, 1, 0)
+    label.Font = Enum.Font.GothamBold
+    label.TextSize = 16
+    label.TextColor3 = Color3.fromRGB(255, 255, 255)
+    label.TextStrokeTransparency = 0
+    label.Text = eggName
+    label.Parent = billboard
+
+    EggRegistry[prompt] = {part = part, name = eggName, highlight = highlight, billboard = billboard, label = label}
+
+    prompt.AncestryChanged:Connect(function(_, parent)
+        if not parent then
+            local data = EggRegistry[prompt]
+            if data then
+                if data.highlight then data.highlight:Destroy() end
+                if data.billboard then data.billboard:Destroy() end
+                EggRegistry[prompt] = nil
+            end
+        end
+    end)
+end
+
+for _, inst in ipairs(Workspace:GetDescendants()) do
+    if inst:IsA("ProximityPrompt") then addEggPrompt(inst) end
+end
+
+Workspace.DescendantAdded:Connect(function(inst)
+    if inst:IsA("ProximityPrompt") then
+        task.defer(addEggPrompt, inst)
+    end
+end)
+
+RunService.Heartbeat:Connect(function()
+    if not EggESP.Enabled then return end
+    local hrp = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+    for prompt, data in pairs(EggRegistry) do
+        if prompt.Parent and data.part and data.part.Parent and hrp then
+            local dist = (data.part.Position - hrp.Position).Magnitude
+            data.label.Text = data.name .. " [" .. math.floor(dist) .. "m]"
+        end
+    end
+end)
+
+local function getNearestEggByName(name)
+    local hrp = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+    local originPos = hrp and hrp.Position or Vector3.new()
+
+    local closestPrompt, closestPart, closestDist = nil, nil, math.huge
+    for prompt, data in pairs(EggRegistry) do
+        if data.name == name and prompt.Parent and data.part and data.part.Parent then
+            local dist = (data.part.Position - originPos).Magnitude
+            if dist < closestDist then
+                closestDist = dist
+                closestPrompt = prompt
+                closestPart = data.part
+            end
+        end
+    end
+    return closestPrompt, closestPart
+end
+
+--// SHARED: HATCH PROMPT TRACKING
+local HatchRegistry = {}
+
+local function isHatchPrompt(prompt)
+    if not prompt:IsA("ProximityPrompt") then return false end
+    local text = ((prompt.ActionText or "") .. " " .. (prompt.ObjectText or "")):lower()
+    return text:find("hatch") ~= nil
+end
+
+local function trackHatchPrompt(prompt)
+    if HatchRegistry[prompt] then return end
+    if not isHatchPrompt(prompt) then return end
+    HatchRegistry[prompt] = true
+    prompt.AncestryChanged:Connect(function(_, parent)
+        if not parent then HatchRegistry[prompt] = nil end
+    end)
+end
+
+for _, inst in ipairs(Workspace:GetDescendants()) do
+    if inst:IsA("ProximityPrompt") then trackHatchPrompt(inst) end
+end
+
+Workspace.DescendantAdded:Connect(function(inst)
+    if inst:IsA("ProximityPrompt") then
+        task.defer(trackHatchPrompt, inst)
+    end
+end)
+
+local function findNearestReadyEggBillboard(excludeSet)
+    local hrp = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+    local originPos = hrp and hrp.Position or Vector3.new()
+
+    local bestPart, bestDist, bestName = nil, math.huge, nil
+
+    for _, inst in ipairs(Workspace:GetDescendants()) do
+        if inst:IsA("BillboardGui") then
+            local combinedText = ""
+            for _, child in ipairs(inst:GetDescendants()) do
+                if child:IsA("TextLabel") then
+                    combinedText = combinedText .. " " .. child.Text
+                end
+            end
+            local lowerText = combinedText:lower()
+            if lowerText:find("ready") then
+                local part = getBillboardPart(inst)
+                if part then
+                    local eggName = nil
+                    for _, name in ipairs(EGG_ORDER) do
+                        if combinedText:find(name) then
+                            eggName = name
+                            break
+                        end
+                    end
+                    if not (eggName and excludeSet[eggName]) then
+                        local dist = (part.Position - originPos).Magnitude
+                        if dist < bestDist then
+                            bestDist = dist
+                            bestPart = part
+                            bestName = eggName
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    return bestPart, bestName
+end
+
+local function findNearbyHatchPrompt(part, maxDist)
+    local bestPrompt, bestDist = nil, maxDist
+    for prompt in pairs(HatchRegistry) do
+        if prompt.Parent then
+            local p = getPromptPart(prompt)
+            if p then
+                local dist = (p.Position - part.Position).Magnitude
+                if dist < bestDist then
+                    bestDist = dist
+                    bestPrompt = prompt
+                end
+            end
+        end
+    end
+    return bestPrompt
+end
+
+local CachedRanchPos = nil
+
+local function scanRanchPosition()
+    for _, inst in ipairs(Workspace:GetDescendants()) do
+        if inst:IsA("BillboardGui") then
+            local combined = ""
+            for _, child in ipairs(inst:GetDescendants()) do
+                if child:IsA("TextLabel") then
+                    combined = combined .. " " .. child.Text
+                end
+            end
+            if combined:lower():find("ranch") then
+                local part = getBillboardPart(inst)
+                if part then return part.Position end
+            end
+        end
+    end
+    return nil
+end
+
+task.spawn(function()
+    while true do
+        local pos = scanRanchPosition()
+        if pos then CachedRanchPos = pos end
+        task.wait(2)
+    end
+end)
+
+local function findRanchPosition()
+    return scanRanchPosition() or CachedRanchPos
+end
+
+--// SHARED: INVENTORY TRACKING
+local function findInventoryTool(name)
+    local backpack = LocalPlayer:FindFirstChild("Backpack")
+    if backpack then
+        local tool = backpack:FindFirstChild(name)
+        if tool and tool:IsA("Tool") then return tool end
+    end
+    local char = LocalPlayer.Character
+    if char then
+        local tool = char:FindFirstChild(name)
+        if tool and tool:IsA("Tool") then return tool end
+    end
+    return nil
+end
+
+--// VISUAL TAB
+VisualTab:CreateSection({ name = "Egg ESP" })
+
+VisualTab:CreateToggle({
+    name = "Egg ESP",
+    value = false,
+    callback = function(value)
+        EggESP.Enabled = value
+        for _, data in pairs(EggRegistry) do
+            if data.highlight then data.highlight.Enabled = value end
+            if data.billboard then data.billboard.Enabled = value end
+        end
+    end,
+})
+
+VisualTab:CreateDivider({ text = "Egg Tracer" })
+
+local Tracer = { Enabled = false, Targets = {} }
+
+local TracerFolder = Instance.new("Folder")
+TracerFolder.Name = "TimTimTracers"
+TracerFolder.Parent = Workspace
+
+local TracerColors = {
+    Color3.fromRGB(255, 0, 0),
+    Color3.fromRGB(0, 255, 170),
+    Color3.fromRGB(255, 220, 0),
+    Color3.fromRGB(120, 170, 255),
+    Color3.fromRGB(255, 140, 255),
+}
+
+local TracerBeams = {}
+
+local function getOriginAttachment()
+    local char = LocalPlayer.Character
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    if not hrp then return nil end
+    local attach = hrp:FindFirstChild("TimTimTracerOrigin")
+    if not attach then
+        attach = Instance.new("Attachment")
+        attach.Name = "TimTimTracerOrigin"
+        attach.Parent = hrp
+    end
+    return attach
+end
+
+local function getOrCreateTracerBeam(eggName, index)
+    local data = TracerBeams[eggName]
+    if data then return data end
+
+    local proxyPart = Instance.new("Part")
+    proxyPart.Name = "TimTimTracerProxy"
+    proxyPart.Anchored = true
+    proxyPart.CanCollide = false
+    proxyPart.CanQuery = false
+    proxyPart.CanTouch = false
+    proxyPart.Transparency = 1
+    proxyPart.Size = Vector3.new(0.2, 0.2, 0.2)
+    proxyPart.Parent = TracerFolder
+
+    local proxyAttachment = Instance.new("Attachment")
+    proxyAttachment.Parent = proxyPart
+
+    local beam = Instance.new("Beam")
+    beam.Width0 = 0.2
+    beam.Width1 = 0.2
+    beam.FaceCamera = true
+    beam.Color = ColorSequence.new(TracerColors[((index - 1) % #TracerColors) + 1])
+    beam.Transparency = NumberSequence.new(0.1)
+    beam.Attachment1 = proxyAttachment
+    beam.Enabled = false
+    beam.Parent = proxyPart
+
+    data = {beam = beam, proxyPart = proxyPart, proxyAttachment = proxyAttachment}
+    TracerBeams[eggName] = data
+    return data
+end
+
+RunService.Heartbeat:Connect(function()
+    if not Tracer.Enabled or #Tracer.Targets == 0 then
+        for _, data in pairs(TracerBeams) do data.beam.Enabled = false end
+        return
+    end
+
+    local origin = getOriginAttachment()
+    local active = {}
+
+    for i, eggName in ipairs(Tracer.Targets) do
+        active[eggName] = true
+        local data = getOrCreateTracerBeam(eggName, i)
+        local beam = data.beam
+
+        if not origin then
+            beam.Enabled = false
+        else
+            beam.Attachment0 = origin
+            local _, part = getNearestEggByName(eggName)
+            if part then
+                data.proxyPart.CFrame = CFrame.new(part.Position)
+                beam.Enabled = true
+            else
+                beam.Enabled = false
+            end
+        end
+    end
+
+    for eggName, data in pairs(TracerBeams) do
+        if not active[eggName] then data.beam.Enabled = false end
+    end
+end)
+
+VisualTab:CreateToggle({
+    name = "Enabled",
+    value = false,
+    callback = function(value)
+        Tracer.Enabled = value
+    end,
+})
+
+VisualTab:CreateDropdown({
+    name = "Egg Tracer",
+    multiSelect = true,
+    options = EGG_ORDER,
+    placeholder = "None",
+    callback = function(selected)
+        Tracer.Targets = selected or {}
+    end,
+})
+
+--// PLAYER TAB
+PlayerTab:CreateSection({ name = "Movement" })
+
+local DEFAULT_WALKSPEED = 16
+local DEFAULT_JUMPPOWER = 50
+
+local currentSpeed = DEFAULT_WALKSPEED
+local currentJump = DEFAULT_JUMPPOWER
+
+LocalPlayer.CharacterAdded:Connect(function(char)
+    task.wait(0.5)
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    if hum then
+        hum.WalkSpeed = currentSpeed
+        hum.JumpPower = currentJump
+    end
+end)
+
+PlayerTab:CreateSlider({
+    name = "Walk Speed",
+    range = { 16, 200 },
+    increment = 1,
+    value = DEFAULT_WALKSPEED,
+    callback = function(value)
+        currentSpeed = value
+        local hum = getHumanoid()
+        if hum then hum.WalkSpeed = value end
+    end,
+})
+
+PlayerTab:CreateSlider({
+    name = "Jump Power",
+    range = { 50, 300 },
+    increment = 1,
+    value = DEFAULT_JUMPPOWER,
+    callback = function(value)
+        currentJump = value
+        local hum = getHumanoid()
+        if hum then hum.JumpPower = value end
+    end,
+})
+
+--// FLIGHT HELPERS (shared by Auto Collect and Auto Hatch)
+local function beginNoclip(char)
+    local original = {}
+    for _, part in ipairs(char:GetDescendants()) do
+        if part:IsA("BasePart") then
+            original[part] = part.CanCollide
+            part.CanCollide = false
+        end
+    end
+    local restored = false
+    return function()
+        if restored then return end
+        restored = true
+        for part, val in pairs(original) do
+            if part and part.Parent then part.CanCollide = val end
+        end
+    end
+end
+
+local FLY_SPEED = 1200
+
+local function smoothFlyTo(hrp, getTargetPos, speed, tolerance, shouldContinue)
+    local bv = Instance.new("BodyVelocity")
+    bv.Name = "TimTimFlight"
+    bv.MaxForce = Vector3.new(1, 1, 1) * math.huge
+    bv.P = 10000
+    bv.Velocity = Vector3.new()
+    bv.Parent = hrp
+
+    local reached = false
+    while shouldContinue() do
+        local dt = RunService.Heartbeat:Wait()
+        if not hrp or not hrp.Parent then break end
+        local targetPos = getTargetPos()
+        if not targetPos then break end
+        local delta = targetPos - hrp.Position
+        local dist = delta.Magnitude
+        if dist <= tolerance then
+            reached = true
+            break
+        end
+        local desiredSpeed = math.min(speed, dist * 8)
+        bv.Velocity = delta.Unit * desiredSpeed
+    end
+
+    bv.Velocity = Vector3.new()
+    bv:Destroy()
+    return reached
+end
+
+--// MAIN TAB - AUTO COLLECT
+MainTab:CreateSection({ name = "Auto Collect" })
+MainTab:CreateSection({ name = "⚠ Stand on your ranch before turning this on" })
+
+local AutoCollect = {
+    Enabled = false,
+    SelectedEggs = {},
+    Active = false,
+}
+
+local function pickPriorityEgg()
+    for i = #EGG_ORDER, 1, -1 do
+        local name = EGG_ORDER[i]
+        if AutoCollect.SelectedEggs[name] then
+            local prompt, part = getNearestEggByName(name)
+            if prompt and part then
+                return name, prompt, part
+            end
+        end
+    end
+    return nil
+end
+
+local AutoCollectToggle
+
+local function runAutoCollectLoop()
+    if AutoCollect.Active then return end
+    AutoCollect.Active = true
+
+    task.spawn(function()
+        local char = LocalPlayer.Character
+        local hrp = char and char:FindFirstChild("HumanoidRootPart")
+        local hum = char and char:FindFirstChildOfClass("Humanoid")
+        if not hrp or not hum then
+            AutoCollect.Active = false
+            AutoCollect.Enabled = false
+            if AutoCollectToggle then AutoCollectToggle:Set(false, true) end
+            return
+        end
+
+        local plotPos = findRanchPosition()
+        if not plotPos then
+            window:Notify({ title = "Auto Collect", content = "Couldn't find your ranch yet — using your current spot." })
+            plotPos = hrp.Position
+        end
+
+        do
+            local function running() return AutoCollect.Enabled and hrp.Parent ~= nil end
+            local restoreCollision = beginNoclip(char)
+            hum.PlatformStand = true
+            smoothFlyTo(hrp, function() return plotPos end, FLY_SPEED, 4, running)
+            hum.PlatformStand = false
+            restoreCollision()
+        end
+
+        while AutoCollect.Enabled do
+            local eggName, prompt, part = pickPriorityEgg()
+
+            if not eggName then
+                task.wait(0.5)
+            else
+                char = LocalPlayer.Character
+                hrp = char and char:FindFirstChild("HumanoidRootPart")
+                hum = char and char:FindFirstChildOfClass("Humanoid")
+
+                if hrp and hum then
+                    local promptGone = false
+                    local ancestryConn
+                    ancestryConn = prompt.AncestryChanged:Connect(function(_, parent)
+                        if not parent then promptGone = true end
+                    end)
+
+                    local function running()
+                        return AutoCollect.Enabled and hrp.Parent ~= nil
+                    end
+
+                    local restoreCollision = beginNoclip(char)
+                    hum.PlatformStand = true
+
+                    smoothFlyTo(hrp, function()
+                        if not part.Parent then return nil end
+                        return part.Position + Vector3.new(0, 3, 0)
+                    end, FLY_SPEED, 4, running)
+
+                    local attempts = 0
+                    while AutoCollect.Enabled and prompt.Parent and not promptGone and attempts < 30 do
+                        firePrompt(prompt)
+                        attempts += 1
+                        task.wait(0.1)
+                    end
+                    ancestryConn:Disconnect()
+
+                    if running() then
+                        smoothFlyTo(hrp, function() return plotPos end, FLY_SPEED, 4, running)
+                    end
+
+                    hum.PlatformStand = false
+                    restoreCollision()
+                else
+                    task.wait(0.5)
+                end
+            end
+        end
+
+        AutoCollect.Active = false
+    end)
+end
+
+MainTab:CreateDropdown({
+    name = "Eggs",
+    multiSelect = true,
+    options = EGG_ORDER,
+    placeholder = "None",
+    callback = function(selected)
+        local set = {}
+        for _, name in ipairs(selected or {}) do set[name] = true end
+        AutoCollect.SelectedEggs = set
+    end,
+})
+
+AutoCollectToggle = MainTab:CreateToggle({
+    name = "Enabled",
+    value = false,
+    callback = function(value)
+        AutoCollect.Enabled = value
+        if value then
+            local any = false
+            for _ in pairs(AutoCollect.SelectedEggs) do any = true break end
+            if not any then
+                window:Notify({ title = "Auto Collect", content = "Pick at least one egg first." })
+                AutoCollect.Enabled = false
+                AutoCollectToggle:Set(false, true)
+                return
+            end
+            runAutoCollectLoop()
+        end
+    end,
+})
+
+--// MAIN TAB - AUTO PLACE
+MainTab:CreateDivider({ text = "Auto Place" })
+
+local AutoPlace = { Enabled = false, SelectedEggs = {}, Active = false }
+
+local function placeEggOnce(tool)
+    local hum = getHumanoid()
+    if not hum then return end
+    hum:EquipTool(tool)
+    task.wait(0.2)
+    pcall(function() tool:Activate() end)
+end
+
+local function checkPlotFullText()
+    local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
+    if not playerGui then return nil end
+    for _, inst in ipairs(playerGui:GetDescendants()) do
+        if inst:IsA("TextLabel") then
+            local current, maxN = inst.Text:match("(%d+)%s*/%s*(%d+)%s*Eggs In Plot")
+            if current and maxN then
+                return tonumber(current) >= tonumber(maxN)
+            end
+        end
+    end
+    return nil
+end
+
+-- Same priority idea as Auto Collect: among your selected egg types,
+-- picks the highest tier that's actually sitting in your inventory right now.
+local function pickPriorityInventoryEgg()
+    for i = #EGG_ORDER, 1, -1 do
+        local name = EGG_ORDER[i]
+        if AutoPlace.SelectedEggs[name] then
+            local tool = findInventoryTool(name)
+            if tool then
+                return name, tool
+            end
+        end
+    end
+    return nil
+end
+
+local function runAutoPlaceLoop()
+    if AutoPlace.Active then return end
+    AutoPlace.Active = true
+
+    task.spawn(function()
+        while AutoPlace.Enabled do
+            local alreadyFull = checkPlotFullText()
+            if alreadyFull == true then
+                task.wait(1.5)
+            else
+                local eggName, tool = pickPriorityInventoryEgg()
+                if not tool then
+                    task.wait(0.5)
+                else
+                    local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
+                    local sawFull = false
+                    local conn
+                    if playerGui then
+                        conn = playerGui.DescendantAdded:Connect(function(inst)
+                            task.wait()
+                            if inst:IsA("TextLabel") then
+                                local current, maxN = inst.Text:match("(%d+)%s*/%s*(%d+)%s*Eggs In Plot")
+                                if current and maxN and tonumber(current) >= tonumber(maxN) then
+                                    sawFull = true
+                                end
+                            end
+                        end)
+                    end
+
+                    placeEggOnce(tool)
+                    task.wait(0.4)
+                    if conn then conn:Disconnect() end
+
+                    if sawFull then
+                        window:Notify({ title = "Auto Place", content = "Plot is full — pausing." })
+                        task.wait(2)
+                    else
+                        task.wait(0.3)
+                    end
+                end
+            end
+        end
+        AutoPlace.Active = false
+    end)
+end
+
+MainTab:CreateDropdown({
+    name = "Eggs To Place",
+    multiSelect = true,
+    options = EGG_ORDER,
+    placeholder = "None",
+    callback = function(selected)
+        local set = {}
+        for _, name in ipairs(selected or {}) do set[name] = true end
+        AutoPlace.SelectedEggs = set
+    end,
+})
+
+MainTab:CreateToggle({
+    name = "Enabled",
+    value = false,
+    callback = function(value)
+        AutoPlace.Enabled = value
+        if value then
+            local any = false
+            for _ in pairs(AutoPlace.SelectedEggs) do any = true break end
+            if not any then
+                window:Notify({ title = "Auto Place", content = "Pick at least one egg first." })
+                AutoPlace.Enabled = false
+                return
+            end
+            runAutoPlaceLoop()
+        end
+    end,
+})
+
+--// MAIN TAB - AUTO HATCH
+MainTab:CreateDivider({ text = "Auto Hatch" })
+
+local AutoHatch = { Enabled = false, Active = false, Exclude = {} }
+
+local function runAutoHatchLoop()
+    if AutoHatch.Active then return end
+    AutoHatch.Active = true
+
+    task.spawn(function()
+        while AutoHatch.Enabled do
+            local part, eggName = findNearestReadyEggBillboard(AutoHatch.Exclude)
+
+            if not part then
+                task.wait(0.3)
+            else
+                local char = LocalPlayer.Character
+                local hrp = char and char:FindFirstChild("HumanoidRootPart")
+                local hum = char and char:FindFirstChildOfClass("Humanoid")
+
+                if hrp and hum then
+                    window:Notify({ title = "Auto Hatch", content = (eggName or "Egg") .. " ready — flying to it." })
+
+                    local function running()
+                        return AutoHatch.Enabled and hrp.Parent ~= nil
+                    end
+
+                    local restoreCollision = beginNoclip(char)
+                    hum.PlatformStand = true
+
+                    smoothFlyTo(hrp, function()
+                        if not part.Parent then return nil end
+                        return part.Position + Vector3.new(0, 3, 0)
+                    end, FLY_SPEED, 4, running)
+
+                    hum.PlatformStand = false
+                    restoreCollision()
+
+                    local prompt = findNearbyHatchPrompt(part, 15)
+                    if prompt then
+                        local attempts = 0
+                        while AutoHatch.Enabled and prompt.Parent and prompt.Enabled and attempts < 50 do
+                            firePrompt(prompt)
+                            attempts += 1
+                            task.wait(0.1)
+                        end
+                    end
+                else
+                    task.wait(0.3)
+                end
+            end
+        end
+        AutoHatch.Active = false
+    end)
+end
+
+MainTab:CreateDropdown({
+    name = "Exclude",
+    multiSelect = true,
+    options = EGG_ORDER,
+    placeholder = "None",
+    callback = function(selected)
+        local set = {}
+        for _, name in ipairs(selected or {}) do set[name] = true end
+        AutoHatch.Exclude = set
+    end,
+})
+
+MainTab:CreateToggle({
+    name = "Enabled",
+    value = false,
+    callback = function(value)
+        AutoHatch.Enabled = value
+        if value then runAutoHatchLoop() end
+    end,
+})
+
+window:Notify({
+    title = "Tim Tim Hub",
+    content = "Loaded successfully.",
+})
