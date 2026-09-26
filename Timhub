@@ -9,6 +9,7 @@ getgenv().TimTimHubLoaded = true
 local Players = game:GetService("Players")
 local Workspace = game:GetService("Workspace")
 local RunService = game:GetService("RunService")
+local VirtualInputManager = game:GetService("VirtualInputManager")
 
 local LocalPlayer = Players.LocalPlayer
 
@@ -35,6 +36,37 @@ local EGG_ORDER = {
     "Crystal Egg", "Skull Egg", "Dominus Egg", "Flaming Egg", "Sinister Egg", "Soul Egg",
     "Aurora Egg", "Galaxy Egg", "Blackhole Egg", "Solaris Egg", "Cherub Egg",
 }
+
+local SUFFIXES = {
+    { "Qi", 1e18 }, { "Qa", 1e15 }, { "T", 1e12 }, { "B", 1e9 }, { "M", 1e6 }, { "K", 1e3 },
+}
+
+local function parseAbbreviatedNumber(str)
+    if not str then return nil end
+    str = tostring(str):gsub("%s+", ""):gsub(",", ""):gsub("%$", "")
+    if str == "" then return nil end
+    local numPart, suffix = str:match("^([%d%.]+)(%a*)$")
+    if not numPart then return tonumber(str) end
+    local n = tonumber(numPart)
+    if not n then return nil end
+    if suffix == "" then return n end
+    for _, pair in ipairs(SUFFIXES) do
+        if suffix:lower() == pair[1]:lower() then
+            return n * pair[2]
+        end
+    end
+    return n
+end
+
+local function formatAbbreviated(n)
+    if not n then return "?" end
+    for _, pair in ipairs(SUFFIXES) do
+        if n >= pair[2] then
+            return string.format("%.2f%s", n / pair[2], pair[1])
+        end
+    end
+    return string.format("%.2f", n)
+end
 
 local function getHumanoid()
     local char = LocalPlayer.Character
@@ -64,8 +96,70 @@ local function getBillboardPart(billboard)
     return adornee:FindFirstChildWhichIsA("BasePart", true) or adornee:FindFirstAncestorWhichIsA("BasePart")
 end
 
+-- Fallback KG reader for world objects: checks attributes/values directly
+-- on the instance. Kept for Egg ESP, since ground eggs might not have a
+-- matching hotbar slot to read from.
+local function getInstanceKG(inst)
+    if not inst then return nil end
+    local attrNames = { "KG", "Kg", "kg", "Weight", "Mass" }
+    for _, attrName in ipairs(attrNames) do
+        local ok, val = pcall(function() return inst:GetAttribute(attrName) end)
+        if ok and val then return tonumber(val) end
+    end
+    local ok, descendants = pcall(function() return inst:GetDescendants() end)
+    if ok then
+        for _, child in ipairs(descendants) do
+            if child:IsA("NumberValue") or child:IsA("IntValue") then
+                local n = child.Name:lower()
+                if n:find("kg") or n:find("weight") then
+                    return child.Value
+                end
+            elseif child:IsA("TextLabel") then
+                local num, suf = child.Text:match("([%d%.]+)%s*(%a*)%s*KG")
+                if num then
+                    return parseAbbreviatedNumber(num .. (suf or ""))
+                end
+            end
+        end
+    end
+    return nil
+end
+
+-- Reads KG straight from the hotbar/inventory UI slot for a given egg
+-- name — this is the actual on-screen source of truth, since the KG
+-- almost certainly isn't stored as data on the Tool instance itself.
+local function findSlotKGForName(name)
+    local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
+    if not playerGui then return nil end
+
+    for _, inst in ipairs(playerGui:GetDescendants()) do
+        if inst:IsA("GuiObject") then
+            local nameMatches = (inst.Name == name) or (inst.Name:sub(1, #name) == name)
+            if not nameMatches then
+                for _, child in ipairs(inst:GetChildren()) do
+                    if child:IsA("TextLabel") and (child.Text == name or child.Text:sub(1, #name) == name) then
+                        nameMatches = true
+                        break
+                    end
+                end
+            end
+            if nameMatches then
+                for _, child in ipairs(inst:GetDescendants()) do
+                    if child:IsA("TextLabel") then
+                        local num, suf = child.Text:match("([%d%.,]+)%s*(%a*)%s*KG")
+                        if num then
+                            return parseAbbreviatedNumber(num .. (suf or ""))
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return nil
+end
+
 --// SHARED: WORLD EGG TRACKING
-local EggESP = { Enabled = false }
+local EggESP = { Enabled = false, DisplayKG = false }
 local EggRegistry = {}
 
 local function isPickupPrompt(prompt)
@@ -82,6 +176,7 @@ local function addEggPrompt(prompt)
     if not part then return end
 
     local eggName = prompt.ObjectText
+    local kgSource = prompt:FindFirstAncestorOfClass("Model") or part
 
     local highlight = Instance.new("Highlight")
     highlight.FillColor = Color3.fromRGB(255, 255, 255)
@@ -95,7 +190,7 @@ local function addEggPrompt(prompt)
     local billboard = Instance.new("BillboardGui")
     billboard.Name = "TimTimEggESP"
     billboard.Adornee = part
-    billboard.Size = UDim2.new(0, 150, 0, 40)
+    billboard.Size = UDim2.new(0, 160, 0, 40)
     billboard.StudsOffset = Vector3.new(0, 2.5, 0)
     billboard.AlwaysOnTop = true
     billboard.Enabled = EggESP.Enabled
@@ -111,7 +206,7 @@ local function addEggPrompt(prompt)
     label.Text = eggName
     label.Parent = billboard
 
-    EggRegistry[prompt] = {part = part, name = eggName, highlight = highlight, billboard = billboard, label = label}
+    EggRegistry[prompt] = {part = part, name = eggName, kgSource = kgSource, highlight = highlight, billboard = billboard, label = label}
 
     prompt.AncestryChanged:Connect(function(_, parent)
         if not parent then
@@ -141,7 +236,14 @@ RunService.Heartbeat:Connect(function()
     for prompt, data in pairs(EggRegistry) do
         if prompt.Parent and data.part and data.part.Parent and hrp then
             local dist = (data.part.Position - hrp.Position).Magnitude
-            data.label.Text = data.name .. " [" .. math.floor(dist) .. "m]"
+            local text = data.name .. " [" .. math.floor(dist) .. "m]"
+            if EggESP.DisplayKG then
+                local kg = getInstanceKG(data.kgSource)
+                if kg then
+                    text = text .. " (" .. formatAbbreviated(kg) .. " KG)"
+                end
+            end
+            data.label.Text = text
         end
     end
 end)
@@ -285,14 +387,42 @@ end
 --// SHARED: INVENTORY TRACKING
 local function findInventoryTool(name)
     local backpack = LocalPlayer:FindFirstChild("Backpack")
-    if backpack then
-        local tool = backpack:FindFirstChild(name)
-        if tool and tool:IsA("Tool") then return tool end
-    end
     local char = LocalPlayer.Character
-    if char then
-        local tool = char:FindFirstChild(name)
-        if tool and tool:IsA("Tool") then return tool end
+    local containers = {}
+    if backpack then table.insert(containers, backpack) end
+    if char then table.insert(containers, char) end
+
+    for _, container in ipairs(containers) do
+        local exact = container:FindFirstChild(name)
+        if exact and exact:IsA("Tool") then return exact end
+    end
+    for _, container in ipairs(containers) do
+        for _, child in ipairs(container:GetChildren()) do
+            if child:IsA("Tool") and child.Name:sub(1, #name) == name then
+                return child
+            end
+        end
+    end
+    return nil
+end
+
+local function findInventoryToolMatchingKG(name, minKG)
+    local backpack = LocalPlayer:FindFirstChild("Backpack")
+    if not backpack then return nil end
+
+    local tool = nil
+    for _, t in ipairs(backpack:GetChildren()) do
+        if t:IsA("Tool") and t.Name:sub(1, #name) == name then
+            tool = t
+            break
+        end
+    end
+    if not tool then return nil end
+    if not minKG or minKG <= 0 then return tool end
+
+    local kg = findSlotKGForName(name) or getInstanceKG(tool)
+    if kg and kg >= minKG then
+        return tool
     end
     return nil
 end
@@ -309,6 +439,14 @@ VisualTab:CreateToggle({
             if data.highlight then data.highlight.Enabled = value end
             if data.billboard then data.billboard.Enabled = value end
         end
+    end,
+})
+
+VisualTab:CreateToggle({
+    name = "Display KG",
+    value = false,
+    callback = function(value)
+        EggESP.DisplayKG = value
     end,
 })
 
@@ -660,7 +798,7 @@ AutoCollectToggle = MainTab:CreateToggle({
 --// MAIN TAB - AUTO PLACE
 MainTab:CreateDivider({ text = "Auto Place" })
 
-local AutoPlace = { Enabled = false, SelectedEggs = {}, Active = false }
+local AutoPlace = { Enabled = false, SelectedEggs = {}, MinKG = 0, Active = false }
 
 local function placeEggOnce(tool)
     local hum = getHumanoid()
@@ -684,13 +822,11 @@ local function checkPlotFullText()
     return nil
 end
 
--- Same priority idea as Auto Collect: among your selected egg types,
--- picks the highest tier that's actually sitting in your inventory right now.
 local function pickPriorityInventoryEgg()
     for i = #EGG_ORDER, 1, -1 do
         local name = EGG_ORDER[i]
         if AutoPlace.SelectedEggs[name] then
-            local tool = findInventoryTool(name)
+            local tool = findInventoryToolMatchingKG(name, AutoPlace.MinKG)
             if tool then
                 return name, tool
             end
@@ -754,6 +890,15 @@ MainTab:CreateDropdown({
         local set = {}
         for _, name in ipairs(selected or {}) do set[name] = true end
         AutoPlace.SelectedEggs = set
+    end,
+})
+
+MainTab:CreateInput({
+    name = "Min KG (0 = any)",
+    placeholderText = "0",
+    value = "0",
+    callback = function(text)
+        AutoPlace.MinKG = parseAbbreviatedNumber(text) or 0
     end,
 })
 
@@ -849,6 +994,153 @@ MainTab:CreateToggle({
     callback = function(value)
         AutoHatch.Enabled = value
         if value then runAutoHatchLoop() end
+    end,
+})
+
+--// MAIN TAB - AUTO UPGRADE LUCK
+MainTab:CreateSection({ name = "Auto Upgrade Luck" })
+
+local AutoUpgradeLuck = { Enabled = false, CashThreshold = 0, Active = false }
+
+-- Reads the currency number by scanning both TextLabels AND TextButtons
+-- (currency displays are often buttons that open the shop), heavily
+-- favoring anything positioned in the top-right of the screen, since
+-- that's where you pointed to it.
+local function getCurrentCashFromUI()
+    local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
+    if not playerGui then return nil end
+
+    local camera = Workspace.CurrentCamera
+    local vw, vh = 1280, 720
+    if camera then
+        vw, vh = camera.ViewportSize.X, camera.ViewportSize.Y
+    end
+
+    local best, bestScore = nil, -math.huge
+    for _, inst in ipairs(playerGui:GetDescendants()) do
+        if inst:IsA("TextLabel") or inst:IsA("TextButton") then
+            local text = inst.Text
+            if text:match("^%d[%d,]*%.?%d*%a*$") and not text:find("%$") and not text:find("/s") then
+                local num = parseAbbreviatedNumber(text)
+                if num and num > 0 then
+                    local pos = inst.AbsolutePosition
+                    local inTopRight = (pos.X > vw * 0.5) and (pos.Y < vh * 0.35)
+                    local score = inst.TextSize + (inTopRight and 10000 or 0)
+                    if score > bestScore then
+                        bestScore = score
+                        best = num
+                    end
+                end
+            end
+        end
+    end
+    return best
+end
+
+local function getCurrentCash()
+    local uiCash = getCurrentCashFromUI()
+    if uiCash then return uiCash end
+
+    local stats = LocalPlayer:FindFirstChild("leaderstats")
+    if stats then
+        for _, name in ipairs({ "Cash", "Money", "Coins", "Clovers" }) do
+            local stat = stats:FindFirstChild(name)
+            if stat then return tonumber(stat.Value) end
+        end
+    end
+    return nil
+end
+
+local function findMaxLuckButton()
+    local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
+    if not playerGui then return nil end
+
+    for _, inst in ipairs(playerGui:GetDescendants()) do
+        if inst:IsA("TextButton") and inst.Text:lower():match("^%s*max%s*$") then
+            local ancestor = inst.Parent
+            for _ = 1, 5 do
+                if not ancestor then break end
+                for _, sib in ipairs(ancestor:GetDescendants()) do
+                    if sib:IsA("TextLabel") and sib.Text:lower():find("hatch luck") then
+                        return inst
+                    end
+                end
+                ancestor = ancestor.Parent
+            end
+        end
+    end
+    return nil
+end
+
+local function clickGuiButton(button)
+    local fired = false
+    pcall(function()
+        for _, conn in ipairs(getconnections(button.MouseButton1Click)) do
+            conn:Fire()
+            fired = true
+        end
+    end)
+    if not fired then
+        pcall(function()
+            local pos = button.AbsolutePosition + button.AbsoluteSize / 2
+            VirtualInputManager:SendMouseButtonEvent(pos.X, pos.Y, 0, true, game, 0)
+            task.wait(0.05)
+            VirtualInputManager:SendMouseButtonEvent(pos.X, pos.Y, 0, false, game, 0)
+            fired = true
+        end)
+    end
+    return fired
+end
+
+local function runAutoUpgradeLuckLoop()
+    if AutoUpgradeLuck.Active then return end
+    AutoUpgradeLuck.Active = true
+
+    task.spawn(function()
+        while AutoUpgradeLuck.Enabled do
+            local cash = getCurrentCash()
+
+            if AutoUpgradeLuck.CashThreshold <= 0 then
+                local button = findMaxLuckButton()
+                if button then
+                    clickGuiButton(button)
+                end
+                task.wait(2)
+            elseif cash and cash >= AutoUpgradeLuck.CashThreshold then
+                local button = findMaxLuckButton()
+                if button then
+                    clickGuiButton(button)
+                    window:Notify({ title = "Auto Upgrade Luck", content = "Max upgraded!" })
+                    task.wait(2)
+                else
+                    task.wait(1)
+                end
+            elseif not cash then
+                window:Notify({ title = "Auto Upgrade Luck", content = "Still can't find your cash on screen." })
+                task.wait(3)
+            else
+                task.wait(1)
+            end
+        end
+        AutoUpgradeLuck.Active = false
+    end)
+end
+
+MainTab:CreateInput({
+    name = "Cash",
+    placeholderText = "0 = always try",
+    value = "0",
+    callback = function(text)
+        AutoUpgradeLuck.CashThreshold = parseAbbreviatedNumber(text) or 0
+    end,
+})
+
+MainTab:CreateToggle({
+    name = "Enabled",
+    value = false,
+    callback = function(value)
+        AutoUpgradeLuck.Enabled = value
+        if value then runAutoUpgradeLuckLoop() end
     end,
 })
 
