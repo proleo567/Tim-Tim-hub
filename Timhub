@@ -41,6 +41,10 @@ local SUFFIXES = {
     { "Qi", 1e18 }, { "Qa", 1e15 }, { "T", 1e12 }, { "B", 1e9 }, { "M", 1e6 }, { "K", 1e3 },
 }
 
+-- FIXED: previously returned the raw number even when the suffix wasn't
+-- recognized (e.g. "47055.0x", your luck multiplier), which is how it
+-- got confused for cash. Now an unrecognized suffix means "not a valid
+-- amount" and returns nil instead of guessing.
 local function parseAbbreviatedNumber(str)
     if not str then return nil end
     str = tostring(str):gsub("%s+", ""):gsub(",", ""):gsub("%$", "")
@@ -55,7 +59,7 @@ local function parseAbbreviatedNumber(str)
             return n * pair[2]
         end
     end
-    return n
+    return nil
 end
 
 local function formatAbbreviated(n)
@@ -66,6 +70,10 @@ local function formatAbbreviated(n)
         end
     end
     return string.format("%.2f", n)
+end
+
+local function stripRichText(s)
+    return (s:gsub("<[^>]->", ""))
 end
 
 local function getHumanoid()
@@ -96,9 +104,6 @@ local function getBillboardPart(billboard)
     return adornee:FindFirstChildWhichIsA("BasePart", true) or adornee:FindFirstAncestorWhichIsA("BasePart")
 end
 
--- Fallback KG reader for world objects: checks attributes/values directly
--- on the instance. Kept for Egg ESP, since ground eggs might not have a
--- matching hotbar slot to read from.
 local function getInstanceKG(inst)
     if not inst then return nil end
     local attrNames = { "KG", "Kg", "kg", "Weight", "Mass" }
@@ -125,9 +130,6 @@ local function getInstanceKG(inst)
     return nil
 end
 
--- Reads KG straight from the hotbar/inventory UI slot for a given egg
--- name — this is the actual on-screen source of truth, since the KG
--- almost certainly isn't stored as data on the Tool instance itself.
 local function findSlotKGForName(name)
     local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
     if not playerGui then return nil end
@@ -298,7 +300,7 @@ local function findNearestReadyEggBillboard(excludeSet)
     local hrp = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
     local originPos = hrp and hrp.Position or Vector3.new()
 
-    local bestPart, bestDist, bestName = nil, math.huge, nil
+    local bestPart, bestDist, bestName, bestBillboard = nil, math.huge, nil, nil
 
     for _, inst in ipairs(Workspace:GetDescendants()) do
         if inst:IsA("BillboardGui") then
@@ -325,6 +327,7 @@ local function findNearestReadyEggBillboard(excludeSet)
                             bestDist = dist
                             bestPart = part
                             bestName = eggName
+                            bestBillboard = inst
                         end
                     end
                 end
@@ -332,24 +335,38 @@ local function findNearestReadyEggBillboard(excludeSet)
         end
     end
 
-    return bestPart, bestName
+    return bestPart, bestName, bestBillboard
 end
 
-local function findNearbyHatchPrompt(part, maxDist)
-    local bestPrompt, bestDist = nil, maxDist
-    for prompt in pairs(HatchRegistry) do
-        if prompt.Parent then
-            local p = getPromptPart(prompt)
-            if p then
-                local dist = (p.Position - part.Position).Magnitude
-                if dist < bestDist then
-                    bestDist = dist
-                    bestPrompt = prompt
+local function findHatchPromptForBillboard(billboardInst, fallbackPart)
+    local container = billboardInst
+    for _ = 1, 6 do
+        if not container then break end
+        for prompt in pairs(HatchRegistry) do
+            if prompt.Parent and prompt:IsDescendantOf(container) then
+                return prompt
+            end
+        end
+        container = container.Parent
+    end
+
+    if fallbackPart then
+        local bestPrompt, bestDist = nil, 5
+        for prompt in pairs(HatchRegistry) do
+            if prompt.Parent then
+                local p = getPromptPart(prompt)
+                if p then
+                    local dist = (p.Position - fallbackPart.Position).Magnitude
+                    if dist < bestDist then
+                        bestDist = dist
+                        bestPrompt = prompt
+                    end
                 end
             end
         end
+        return bestPrompt
     end
-    return bestPrompt
+    return nil
 end
 
 local CachedRanchPos = nil
@@ -931,7 +948,7 @@ local function runAutoHatchLoop()
 
     task.spawn(function()
         while AutoHatch.Enabled do
-            local part, eggName = findNearestReadyEggBillboard(AutoHatch.Exclude)
+            local part, eggName, billboardInst = findNearestReadyEggBillboard(AutoHatch.Exclude)
 
             if not part then
                 task.wait(0.3)
@@ -958,7 +975,7 @@ local function runAutoHatchLoop()
                     hum.PlatformStand = false
                     restoreCollision()
 
-                    local prompt = findNearbyHatchPrompt(part, 15)
+                    local prompt = findHatchPromptForBillboard(billboardInst, part)
                     if prompt then
                         local attempts = 0
                         while AutoHatch.Enabled and prompt.Parent and prompt.Enabled and attempts < 50 do
@@ -1002,10 +1019,6 @@ MainTab:CreateSection({ name = "Auto Upgrade Luck" })
 
 local AutoUpgradeLuck = { Enabled = false, CashThreshold = 0, Active = false }
 
--- Reads the currency number by scanning both TextLabels AND TextButtons
--- (currency displays are often buttons that open the shop), heavily
--- favoring anything positioned in the top-right of the screen, since
--- that's where you pointed to it.
 local function getCurrentCashFromUI()
     local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
     if not playerGui then return nil end
@@ -1019,9 +1032,9 @@ local function getCurrentCashFromUI()
     local best, bestScore = nil, -math.huge
     for _, inst in ipairs(playerGui:GetDescendants()) do
         if inst:IsA("TextLabel") or inst:IsA("TextButton") then
-            local text = inst.Text
-            if text:match("^%d[%d,]*%.?%d*%a*$") and not text:find("%$") and not text:find("/s") then
-                local num = parseAbbreviatedNumber(text)
+            local raw = stripRichText(inst.Text)
+            if raw:match("^%d[%d,]*%.?%d*%a*$") and not raw:find("%$") and not raw:find("/s") then
+                local num = parseAbbreviatedNumber(raw)
                 if num and num > 0 then
                     local pos = inst.AbsolutePosition
                     local inTopRight = (pos.X > vw * 0.5) and (pos.Y < vh * 0.35)
@@ -1056,16 +1069,30 @@ local function findMaxLuckButton()
     if not playerGui then return nil end
 
     for _, inst in ipairs(playerGui:GetDescendants()) do
-        if inst:IsA("TextButton") and inst.Text:lower():match("^%s*max%s*$") then
-            local ancestor = inst.Parent
-            for _ = 1, 5 do
-                if not ancestor then break end
-                for _, sib in ipairs(ancestor:GetDescendants()) do
-                    if sib:IsA("TextLabel") and sib.Text:lower():find("hatch luck") then
-                        return inst
+        if inst:IsA("GuiButton") then
+            local isMax = false
+            if inst:IsA("TextButton") and inst.Text:lower():match("^%s*max%s*$") then
+                isMax = true
+            else
+                for _, child in ipairs(inst:GetDescendants()) do
+                    if child:IsA("TextLabel") and child.Text:lower():match("^%s*max%s*$") then
+                        isMax = true
+                        break
                     end
                 end
-                ancestor = ancestor.Parent
+            end
+
+            if isMax then
+                local ancestor = inst.Parent
+                for _ = 1, 6 do
+                    if not ancestor then break end
+                    for _, sib in ipairs(ancestor:GetDescendants()) do
+                        if sib:IsA("TextLabel") and sib.Text:lower():find("hatch luck") then
+                            return inst
+                        end
+                    end
+                    ancestor = ancestor.Parent
+                end
             end
         end
     end
@@ -1092,6 +1119,8 @@ local function clickGuiButton(button)
     return fired
 end
 
+local lastDebugNotify = 0
+
 local function runAutoUpgradeLuckLoop()
     if AutoUpgradeLuck.Active then return end
     AutoUpgradeLuck.Active = true
@@ -1099,25 +1128,29 @@ local function runAutoUpgradeLuckLoop()
     task.spawn(function()
         while AutoUpgradeLuck.Enabled do
             local cash = getCurrentCash()
+            local button = findMaxLuckButton()
+
+            if os.clock() - lastDebugNotify > 5 then
+                lastDebugNotify = os.clock()
+                window:Notify({
+                    title = "Auto Upgrade Luck",
+                    content = "Cash: " .. (cash and formatAbbreviated(cash) or "not found")
+                        .. " | MAX button: " .. (button and "found" or "not found"),
+                })
+            end
 
             if AutoUpgradeLuck.CashThreshold <= 0 then
-                local button = findMaxLuckButton()
-                if button then
-                    clickGuiButton(button)
-                end
+                if button then clickGuiButton(button) end
                 task.wait(2)
             elseif cash and cash >= AutoUpgradeLuck.CashThreshold then
-                local button = findMaxLuckButton()
                 if button then
                     clickGuiButton(button)
-                    window:Notify({ title = "Auto Upgrade Luck", content = "Max upgraded!" })
+                    task.wait(0.15)
+                    clickGuiButton(button)
                     task.wait(2)
                 else
                     task.wait(1)
                 end
-            elseif not cash then
-                window:Notify({ title = "Auto Upgrade Luck", content = "Still can't find your cash on screen." })
-                task.wait(3)
             else
                 task.wait(1)
             end
